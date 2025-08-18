@@ -7,31 +7,59 @@ from scipy.optimize import minimize
 from statsmodels.distributions.empirical_distribution import ECDF
 
 # Leitura dos dados
-df = pd.read_csv('caucaia.txt', delimiter=';')
+df = pd.read_csv('crato.txt', delimiter=';')
+
+media_mes = {
+    '1': 0,
+    '2': 0,
+    '3': 0,
+    '4': 0,
+    '5': 0,
+    '6': 0,
+    '7': 0,
+    '8': 0,
+    '9': 0,
+    '10': 0,
+    '11': 0,
+    '12': 0
+}
 
 # Função para calcular as datas e intervalos entre chuvas fortes
 def calcular_datas_e_intervalos(df):
     datas_chuva_forte = []
-    
+    meses_com_chuva_forte = set()
+    contagem_chuvas_fortes = {i: 0 for i in range(1, 13)}  # agora conta quantas
+
     for index, row in df.iterrows():
-        ano = int(row['Anos'])
         mes = int(row['Meses'])
-        
         for dia in range(1, 32):
             coluna_dia = f'Dia{dia}'
-            if coluna_dia in row and row[coluna_dia] > 100:  # Chuva forte > 100mm
-                data = datetime(day=dia, month=mes, year=ano)
+            if coluna_dia in row and row[coluna_dia] > 100 and row[coluna_dia] < 888:
+                data = datetime(day=dia, month=mes, year=int(row['Anos']))
                 datas_chuva_forte.append(data)
-    
+                contagem_chuvas_fortes[mes] += 1
+                meses_com_chuva_forte.add(mes)
+
+    todos_os_meses = set(range(1, 13))
+    meses_sem_chuva_forte = sorted(todos_os_meses - meses_com_chuva_forte)
+
     intervalos = []
     for i in range(1, len(datas_chuva_forte)):
         intervalo = (datas_chuva_forte[i] - datas_chuva_forte[i-1]).days
         intervalos.append(intervalo)
-    
-    return datas_chuva_forte, intervalos
+
+    return datas_chuva_forte, intervalos, meses_sem_chuva_forte, contagem_chuvas_fortes
 
 # Executar a função para obter as datas e intervalos
-datas_chuva_forte, intervalos = calcular_datas_e_intervalos(df)
+datas_chuva_forte, intervalos, meses_sem_chuva, contagem_chuvas_fortes = calcular_datas_e_intervalos(df)
+
+media_chuva_mes = df.groupby("Meses")["Total"].mean()
+
+for mes in media_mes.keys():
+    mes_int = int(mes)
+    media = round(media_chuva_mes.loc[mes_int], 2) if mes_int in media_chuva_mes.index else 0
+    qtd = contagem_chuvas_fortes.get(mes_int, 0)
+    media_mes[mes] = (media, qtd)
 
 # Ajuste do WGRP (Weibull-based Generalized Renewal Process)
 def virtual_age_type_I(v_prev, x, q):
@@ -65,6 +93,27 @@ params_weibull = weibull_min.fit(intervalos, floc=0)
 initial_alpha = params_weibull[2]  # parâmetro de escala
 initial_beta = params_weibull[0]   # parâmetro de forma
 initial_q = 0  # valor inicial para q (entre 0 e 1)
+
+q_values = np.linspace(0, 1, 21)  # Testa valores de q de 0.0 a 1.0 com passo 0.05
+log_likelihoods_I = []
+log_likelihoods_II = []
+
+for q in q_values:
+    ll_I = wgrp_log_likelihood([initial_alpha, initial_beta, q], intervalos, virtual_age_type_I)
+    ll_II = wgrp_log_likelihood([initial_alpha, initial_beta, q], intervalos, virtual_age_type_II)
+    log_likelihoods_I.append(ll_I)
+    log_likelihoods_II.append(ll_II)
+
+# Seleciona o melhor initial_q baseado na menor log-verossimilhança negativa
+best_initial_q_I = q_values[np.argmin(log_likelihoods_I)]
+best_initial_q_II = q_values[np.argmin(log_likelihoods_II)]
+
+# Para manter compatibilidade com seu fluxo, escolha o melhor dos dois como ponto de partida
+initial_q = min(best_initial_q_I, best_initial_q_II)
+
+print(f"\nInitial_q sugerido (Type I): {best_initial_q_I:.2f}")
+print(f"Initial_q sugerido (Type II): {best_initial_q_II:.2f}")
+print(f"Initial_q usado no ajuste: {initial_q:.2f}")
 
 # Ajustar o modelo WGRP Type I
 bounds = [(0.1, None), (0.1, None), (0, 1)]  # alpha > 0, beta > 0, q entre 0 e 1
@@ -210,10 +259,9 @@ def simulate_next_event(datas_chuva_forte, intervalos, alpha, beta, q, virtual_a
 sim_results = simulate_next_event(datas_chuva_forte, intervalos, alpha, beta, q, virtual_age_func)
 
 # Resultados da previsão
-print("\n=== Previsão da Próxima Chuva Forte ===")
-print(f"Data mediana prevista: {sim_results['median_date'].strftime('%d/%m/%Y')}")
-print(f"Data média prevista: {sim_results['mean_date'].strftime('%d/%m/%Y')}")
-print(f"Intervalo de confiança 95%: {sim_results['ci_low_date'].strftime('%d/%m/%Y')} a {sim_results['ci_high_date'].strftime('%d/%m/%Y')}")
+print("\n=== Sobre as chuvas ===")
+print(f"Meses que nunca tiveram chuvas fortes: {meses_sem_chuva}\n")
+print(f"Intervalo de confiança 95% em que chuvas fortes ocorrerão: {sim_results['ci_low_date'].strftime('%d/%m/%Y')} a {sim_results['ci_high_date'].strftime('%d/%m/%Y')}")
 
 # Calcular dias até a próxima chuva forte a partir de hoje
 data_hoje = datetime.now()
@@ -296,6 +344,24 @@ plt.annotate(f'95º percentil ≈ {p95_x:.1f} dias',
              xytext=(p95_x - 500, 0.9),
              arrowprops=dict(facecolor='red', arrowstyle='->'),
              color='red')
+
+# Transforma em DataFrame para plotagem
+df_plot = pd.DataFrame(
+    [(mes, valores[0], valores[1]) for mes, valores in media_mes.items()],
+    columns=["Mes", "Media", "ChuvasFortes"]
+)
+df_plot["Mes"] = df_plot["Mes"].astype(int)
+df_plot = df_plot.sort_values("Mes")
+
+plt.figure(figsize=(12, 5))
+
+# Gráfico de barras lado a lado
+plt.bar(df_plot["Mes"] - 0.2, df_plot["Media"], width=0.4, label="Média de Chuvas (mm)")
+plt.bar(df_plot["Mes"] + 0.2, df_plot["ChuvasFortes"], width=0.4, label="Qtd Chuvas Fortes")
+
+plt.xlabel("Mês")
+plt.title("Média de Chuvas e Quantidade de Chuvas Fortes por Mês")
+plt.xticks(range(1, 13))
 
 plt.legend()
 plt.tight_layout()
